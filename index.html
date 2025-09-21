@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>AI Daily Digest</title>
+  <style>
+    body { font-family: sans-serif; max-width: 800px; margin: 40px auto; line-height: 1.6; }
+    h1 { border-bottom: 2px solid #ddd; padding-bottom: 10px; }
+    .archive { margin-top: 40px; }
+  </style>
+</head>
+<body>
+  <h1>🧠 AI Daily Digest</h1>
+  <div id="latest-content">Loading today's digest...</div>
+
+  <div class="archive">
+    <h2>📅 Previous Digests</h2>
+    <ul id="archive-list">
+      <!-- Archive links will load here -->
+    </ul>
+  </div>
+
+  <script>
+    async function getLatestPost() {
+      const today = new Date().toISOString().slice(0, 10);
+      const url = `posts/${today}-ai-digest.html`;
+      const res = await fetch(url);
+      const html = await res.text();
+      document.getElementById('latest-content').innerHTML = html;
+    }
+
+    async function getArchiveLinks() {
+      const res = await fetch('archive.html');
+      const text = await res.text();
+      document.getElementById('archive-list').innerHTML = text;
+    }
+
+    getLatestPost();
+    getArchiveLinks();
+  </script>
+</body>
+</html>

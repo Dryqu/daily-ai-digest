@@ -2,8 +2,8 @@ name: Daily Manus Digest to HTML
 
 on:
   schedule:
-    - cron: '0 22 * * *'  # 5:00 PM Eastern during Standard Time (UTC-5)
-    - cron: '0 21 * * *'  # 5:00 PM Eastern during Daylight Time (UTC-4)
+    - cron: '15 22 * * *'  # 5:15 PM Eastern during Standard Time (UTC-5)
+    - cron: '15 21 * * *'  # 5:15 PM Eastern during Daylight Time (UTC-4)
   workflow_dispatch:
 
 permissions:
@@ -17,8 +17,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set today's date env
-        run: echo "TODAY=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+      - name: Set today's UTC date env
+        run: echo "TODAY=$(date -u +'%Y-%m-%d')" >> $GITHUB_ENV
 
       - name: Ensure tools and directories
         run: |
@@ -26,81 +26,57 @@ jobs:
           sudo apt-get install -y jq
           mkdir -p posts
 
-      - name: Fetch latest Manus output and save to file (with retries)
+      - name: Fetch latest Manus output and save to file (with backoff)
         env:
           MANUS_API_KEY: ${{ secrets.MANUS_API_KEY }}
         run: |
           set -euo pipefail
 
-          retry() {
-            # args: <method> <url> [data]
-            local method="$1"; shift
-            local url="$1"; shift
-            local data="${1:-}"
-
-            for attempt in {1..6}; do
-              echo "Attempt $attempt: $method $url"
-              if [ -n "$data" ]; then
-                RESP=$(curl -sS -D /tmp/headers.txt -o /tmp/body.txt \
-                  -H "Authorization: Bearer $MANUS_API_KEY" \
-                  -H "Accept: application/json" \
-                  -X "$method" "$url" --data "$data" -w "%{http_code}")
-              else
-                RESP=$(curl -sS -D /tmp/headers.txt -o /tmp/body.txt \
-                  -H "Authorization: Bearer $MANUS_API_KEY" \
-                  -H "Accept: application/json" \
-                  -X "$method" "$url" -w "%{http_code}")
-              fi
-
-              CODE="$RESP"
+          fetch_list() {
+            for attempt in 1 2 3; do
+              echo "Listing outputs (attempt $attempt)…"
+              CODE=$(curl -sS -D /tmp/h.txt -o /tmp/list.json \
+                -H "Authorization: Bearer $MANUS_API_KEY" \
+                -H "Accept: application/json" \
+                "https://api.manus.ai/v1/outputs?limit=1" \
+                -w "%{http_code}" || echo "000")
               echo "HTTP $CODE"
-              head -c 400 /tmp/body.txt || true
-              echo
-
-              if [ "$CODE" = "200" ]; then
-                return 0
-              fi
-
+              if [ "$CODE" = "200" ]; then return 0; fi
               if [ "$CODE" = "429" ] || [[ "$CODE" =~ ^5 ]]; then
-                SLEEP=$(awk -F': ' 'tolower($1)=="retry-after"{print $2}' /tmp/headers.txt | tr -d '\r' || true)
-                SLEEP=${SLEEP:-$((2 ** attempt))}
-                echo "Rate limited/server error. Sleeping ${SLEEP}s…"
-                sleep "$SLEEP"
-                continue
+                SLEEP=$(awk -F': ' 'tolower($1)=="retry-after"{print $2}' /tmp/h.txt | tr -d '\r' || true)
+                SLEEP=${SLEEP:-$(( 15 * attempt ))}
+                echo "Backoff ${SLEEP}s…"; sleep "$SLEEP"; continue
               fi
-
-              echo "Unexpected HTTP status: $CODE"
-              cat /tmp/body.txt || true
+              echo "Unexpected status $CODE"; cat /tmp/list.json || true
               return 1
             done
-
-            echo "Gave up after retries."
-            cat /tmp/body.txt || true
+            echo "Gave up after retries."; cat /tmp/list.json || true
             return 1
           }
 
-          TODAY=${TODAY:-"$(date +'%Y-%m-%d')"}
-          mkdir -p posts
+          fetch_list
 
-          # 1) Get the most recent output (adjust query params if you want to scope further)
-          retry GET "https://api.manus.ai/v1/outputs?limit=1"
-
-          OUTPUT_ID=$(jq -r '.data[0].id // empty' < /tmp/body.txt)
+          OUTPUT_ID=$(jq -r '.data[0].id // empty' < /tmp/list.json)
           if [ -z "$OUTPUT_ID" ]; then
-            echo "No outputs returned by Manus API."
-            echo "Full body:"; cat /tmp/body.txt || true
+            echo "No Manus outputs found (or API shape unexpected)."
+            echo "Response was:"; cat /tmp/list.json || true
             exit 1
           fi
+
           echo "Latest OUTPUT_ID: $OUTPUT_ID"
 
-          # 2) Download that output as HTML
-          retry GET "https://api.manus.ai/v1/outputs/$OUTPUT_ID"
+          # Try .ai then .run host in case your account uses the alternate domain
+          for URL in \
+            "https://api.manus.ai/v1/outputs/$OUTPUT_ID" \
+            "https://api.manus.run/v1/outputs/$OUTPUT_ID"
+          do
+            echo "Downloading $URL"
+            CODE=$(curl -sS -o "posts/${TODAY}-ai-digest.html" -H "Authorization: Bearer $MANUS_API_KEY" "$URL" -w "%{http_code}" -D /tmp/h2.txt || echo "000")
+            [ "$CODE" = "200" ] && break
+          done
 
-          cp /tmp/body.txt "posts/${TODAY}-ai-digest.html"
-
-          # 3) Sanity check
           if [ ! -s "posts/${TODAY}-ai-digest.html" ]; then
-            echo "Downloaded file is empty."
+            echo "Downloaded file is empty — failing the job."
             exit 1
           fi
 

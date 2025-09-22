@@ -1,0 +1,70 @@
+name: Daily Manus Digest to HTML
+
+on:
+  schedule:
+    - cron: '0 22 * * *'  # 5:00 PM Eastern during Standard Time (UTC-5)
+    - cron: '0 21 * * *'  # 5:00 PM Eastern during Daylight Time (UTC-4)
+  workflow_dispatch:
+
+jobs:
+  fetch-and-store:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set today's date env
+        run: echo "TODAY=$(date +'%Y-%m-%d')" >> $GITHUB_ENV
+
+      - name: Ensure tools and directories
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y jq
+          mkdir -p posts
+
+      - name: Fetch latest Manus output and save to file
+        env:
+          MANUS_API_KEY: ${{ secrets.MANUS_API_KEY }}
+        run: |
+          set -euo pipefail
+
+          # 1) Get the most recent completed output
+          LIST_JSON=$(curl -sS -H "Authorization: Bearer $MANUS_API_KEY" \
+            "https://api.manus.ai/v1/outputs?limit=1&status=completed")
+
+          OUTPUT_ID=$(echo "$LIST_JSON" | jq -r '.data[0].id // empty')
+
+          if [ -z "${OUTPUT_ID:-}" ]; then
+            echo "No Manus outputs found (or API shape unexpected)."
+            echo "Response was:"; echo "$LIST_JSON"
+            exit 1
+          fi
+
+          echo "Latest OUTPUT_ID: $OUTPUT_ID"
+
+          # 2) Download that output as HTML to posts/YYYY-MM-DD-ai-digest.html
+          curl -sS -H "Authorization: Bearer $MANUS_API_KEY" \
+            "https://api.manus.ai/v1/outputs/$OUTPUT_ID" \
+            -o "posts/${TODAY}-ai-digest.html"
+
+          # Basic sanity check: ensure file is non-empty
+          if [ ! -s "posts/${TODAY}-ai-digest.html" ]; then
+            echo "Downloaded file is empty — failing the job."
+            exit 1
+          fi
+
+      - name: Update archive.html
+        run: |
+          LINE="<li><a href='posts/${TODAY}-ai-digest.html'>${TODAY}</a></li>"
+          # Append only if not already present
+          touch archive.html
+          grep -qxF "$LINE" archive.html || echo "$LINE" >> archive.html
+
+      - name: Commit and push
+        run: |
+          git config --global user.name 'AI Digest Bot'
+          git config --global user.email 'aibot@example.com'
+          git add "posts/${TODAY}-ai-digest.html" archive.html
+          git commit -m "📥 Add AI Digest for ${TODAY}" || echo "No changes to commit"
+          git push
